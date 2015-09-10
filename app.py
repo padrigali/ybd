@@ -17,6 +17,7 @@
 import contextlib
 import datetime
 import os
+import fcntl
 import shutil
 import sys
 import warnings
@@ -139,6 +140,22 @@ def load_configs(config_files):
             for key, value in yaml.safe_load(text).items():
                 config[key] = value
             log('SETUP', 'Configuration from %s:\n\n' % config_file, text)
+
+
+def cleanup(tmpdir):
+    try:
+        with open(os.path.join(config['base'], 'lock'), 'w') as lockfile:
+            to_delete = os.listdir(tmpdir)
+            fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lockfile, fcntl.LOCK_UN)
+            if os.fork() == 0:
+                for dirname in to_delete:
+                    if os.path.isdir(dirname):
+                        shutil.rmtree(dirname)
+                log('SETUP', 'Cleanup successful for', tmpdir)
+                sys.exit(0)
+    except IOError:
+        log('SETUP', 'No cleanup for', tmpdir)
 
 
 @contextlib.contextmanager
