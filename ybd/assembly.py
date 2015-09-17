@@ -15,8 +15,9 @@
 # =*= License: GPL-2 =*=
 
 import os
-import random
 from subprocess import call, check_output
+import contextlib
+import fcntl
 
 import json
 import app
@@ -30,12 +31,8 @@ import datetime
 def assemble(defs, target):
     '''Assemble dependencies and contents recursively until target exists.'''
 
-    if cache.get_cache(defs, target):
-        return cache.cache_key(defs, target)
-
-    random.seed(datetime.datetime.now())
     component = defs.get(target)
-    if cache.get_remote_artifact(defs, component):
+    if cache.get_cache(defs, component) or cache.get_remote(defs, component):
         app.config['counter'] += 1
         return cache.cache_key(defs, component)
 
@@ -43,11 +40,11 @@ def assemble(defs, target):
         app.log(target, 'Skipping assembly for', component.get('arch'))
         return None
 
-    with app.timer(component, 'assembly of %s' % component['cache']):
+    with app.timer(component, 'assembly of %s' % component['cache']), lock(defs, component):
         sandbox.setup(component)
-
         systems = component.get('systems', [])
-        random.shuffle(systems)
+        reorder(defs, systems)
+
         for system in systems:
             assemble(defs, system['path'])
             for subsystem in system.get('subsystems', []):
@@ -58,7 +55,7 @@ def assemble(defs, target):
             preinstall(defs, component, it)
 
         contents = component.get('contents', [])
-        random.shuffle(contents)
+        reorder(defs, contents)
         for it in contents:
             subcomponent = defs.get(it)
             if subcomponent.get('build-mode', 'staging') != 'bootstrap':
@@ -77,6 +74,17 @@ def assemble(defs, target):
     return cache.cache_key(defs, component)
 
 
+def reorder(defs, component_list):
+    index = 0
+    for component in component_list:
+        if is_building(defs, component):
+            app.log(component, "Try later")
+            component_list.append(component_list.pop(index))
+        else:
+	        app.log(component, 'I can build')
+        index +=1
+
+
 def preinstall(defs, component, it):
     '''Install it and all its recursed dependencies into component sandbox.'''
     dependency = defs.get(it)
@@ -85,7 +93,7 @@ def preinstall(defs, component, it):
         return
 
     dependencies = dependency.get('build-depends', [])
-    random.shuffle(dependencies)
+    reorder(defs, dependencies)
     for dep in dependencies:
         it = defs.get(dep)
         if (it.get('build-mode', 'staging') ==
@@ -93,7 +101,7 @@ def preinstall(defs, component, it):
          preinstall(defs, component, it)
 
     contents = dependency.get('contents', [])
-    random.shuffle(contents)
+    reorder(defs, contents)
     for sub in contents:
         it = defs.get(sub)
         if it.get('build-mode', 'staging') != 'bootstrap':
@@ -174,6 +182,30 @@ def get_build_commands(defs, this):
         if this.get(build_step, None) is None:
             commands = defs.defaults.build_systems[bs].get(build_step, [])
             this[build_step] = commands
+
+
+def lockfile(defs, this):
+    return os.path.join(app.config['artifacts'],
+                        cache.cache_key(defs, this) + '.lock')
+
+
+def is_building(defs, this):
+    try:
+        with open(lockfile(defs, this), 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+    except:
+        return True
+
+
+@contextlib.contextmanager
+def lock(defs, this):    
+    with open(lockfile(defs, this), 'w') as l:
+        fcntl.flock(l, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            return
 
 
 def gather_integration_commands(defs, this):

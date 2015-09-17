@@ -19,7 +19,7 @@ import json
 import re
 import shutil
 import string
-from subprocess import call, check_output
+from subprocess import call, check_output, check_call
 import sys
 
 import requests
@@ -60,7 +60,7 @@ def get_repo_name(repo):
 def get_version(gitdir, ref='HEAD'):
     try:
         with app.chdir(gitdir), open(os.devnull, "w") as fnull:
-            described = check_output(['git', 'describe', '--tags', '--dirty'],
+            described = check_output(['git', 'describe', '--tags', '--dirty', ref],
                                      stderr=fnull)[0:-1]
             last_tag = check_output(['git', 'describe', '--abbrev=0',
                                      '--tags', ref], stderr=fnull)[0:-1]
@@ -162,7 +162,8 @@ def update_mirror(name, repo, gitdir):
             app.exit(name, 'ERROR: git update mirror failed', repo)
 
 
-def checkout(name, repo, ref, checkout):
+def clone(name, repo, ref, target_dir):
+    app.log(name, 'Cloning git repo %s in %s' % (repo, target_dir))
     gitdir = os.path.join(app.config['gits'], get_repo_name(repo))
     if not os.path.exists(gitdir):
         mirror(name, repo)
@@ -175,22 +176,47 @@ def checkout(name, repo, ref, checkout):
         # inside the sandbox. If they were hardlinks, it'd be possible for a
         # build to corrupt the repo cache. I think it would be faster if we
         # removed --no-hardlinks, though.
-        if call(['git', 'clone', '--no-hardlinks', gitdir, checkout],
+        if call(['git', 'clone', '--no-hardlinks', gitdir, target_dir],
                 stdout=fnull, stderr=fnull):
             app.exit(name, 'ERROR: git clone failed for', ref)
 
-        with app.chdir(checkout):
+        with app.chdir(target_dir):
             if call(['git', 'checkout', '--force', ref], stdout=fnull,
                     stderr=fnull):
                 app.exit(name, 'ERROR: git checkout failed for', ref)
 
-            app.log(name, 'Git checkout %s in %s' % (repo, checkout))
-            app.log(name, 'Upstream version %s' % get_version(checkout, ref))
+            app.log(name, 'Upstream version %s' % get_version(target_dir, ref))
 
             if os.path.exists('.gitmodules'):
                 checkout_submodules(name, ref)
 
-    utils.set_mtime_recursively(checkout)
+    utils.set_mtime_recursively(target_dir)
+
+
+def checkout(name, repo, ref, target_dir):
+    '''Check out a single commit (or tree) from a Git repo.
+    This is much quicker than clone when you don't need to copy the whole
+    repo into target_dir.
+    '''
+    gitdir = os.path.join(app.config['gits'], get_repo_name(repo))
+
+    if not os.path.exists(gitdir):
+        mirror(name, repo)
+    elif not mirror_has_ref(gitdir, ref):
+        app.log(name, 'Updating', repo)
+        update_mirror(name, repo, gitdir)
+
+    with tempfile.NamedTemporaryFile() as git_index_file:
+        git_env = os.environ.copy()
+        git_env['GIT_INDEX_FILE'] = git_index_file.name
+        git_env['GIT_WORK_TREE'] = target_dir
+
+        app.log(name, 'Extracting commit %s from' % ref, repo)
+        check_call(['git', 'read-tree', ref], env=git_env, cwd=gitdir)
+        check_call(['git', 'checkout-index', '--all'], env=git_env, cwd=gitdir)
+        app.log(name, 'Upstream version %s' % get_version(gitdir, ref))
+
+    utils.set_mtime_recursively(target_dir)
 
 
 def checkout_submodules(name, ref):
